@@ -22,13 +22,13 @@ __global__ void matrixMultiply(float *A, float *B, float *C, int numARows,
   int col = blockIdx.x*blockDim.x+threadIdx.x;
 
   //check row of A is valid and column of B is valid
-  if(row < numARows && col < numBColumns){
+  if(row < numCRows && col < numCColumns){
     float cVal = 0;
     //do the matrix mult for this spot
     for(int i=0; i<numAColumns; i++){
       cVal += A[row*numAColumns+i] * B[i*numBColumns+col]; 
     }
-    C[row*numCRows+col] = cVal;
+    C[row*numCColumns+col] = cVal;
   }
 }
 
@@ -86,7 +86,11 @@ int main(int argc, char **argv) {
 
   //@@ Initialize the grid and block dimensions here
 
-  dim3 DimGrid(ceil(((float)numCRows)/4),ceil(((float)numCColumns)/4),1);
+  dim3 DimGrid(ceil((float)numCColumns/4),ceil((float)numCRows/4),1);
+  /*if(numCColumns%4 != 0)
+    DimGrid.x += 1;
+  if(numCRows%4 !=0)
+    DimGrid.y += 1;*/
   dim3 DimBlock(4,4,1);
 
   wbTime_start(Compute, "Performing CUDA computation");
@@ -117,7 +121,7 @@ int main(int argc, char **argv) {
 
   wbSolution(args, hostC, numCRows, numCColumns);
 
-  if(numBColumns == 257){
+  /*if(numBColumns == 257){
     int i = numCRows - 2;
     for(int j=0; j<numCColumns; j++){
       wbLog(TRACE, hostC[i*numCColumns + j]);
@@ -129,7 +133,7 @@ int main(int argc, char **argv) {
       wbLog(TRACE, hostC[i*numCColumns + j]);
     }
     wbLog(TRACE, '\n');
-  }
+  }*/
  
   free(hostA);
   free(hostB);
