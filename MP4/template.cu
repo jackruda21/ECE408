@@ -13,10 +13,12 @@
 //@@ Define any useful program-wide constants here
 
 //@@ Define constant memory for device kernel here
+__constant__ float filter[3][3][3];
 
 __global__ void conv3d(float *input, float *output, const int z_size,
                        const int y_size, const int x_size) {
   //@@ Insert kernel code here
+
 }
 
 int main(int argc, char *argv[]) {
@@ -60,6 +62,14 @@ int main(int argc, char *argv[]) {
   // Recall that the first three elements of hostInput are dimensions and
   // do
   // not need to be copied to the gpu
+
+
+
+  //Setting constant mem
+  for(int i=0; i<3*3*3; i++){
+    filter[i] = hostKernel[i]
+  }
+
   wbTime_stop(Copy, "Copying data to the GPU");
 
   wbTime_start(Compute, "Doing the computation on the GPU");
