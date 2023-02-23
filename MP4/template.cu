@@ -11,7 +11,7 @@
   } while (0)
 
 //@@ Define any useful program-wide constants here
-
+#define BLOCK_WIDTH 4
 //@@ Define constant memory for device kernel here
 __constant__ float filter[3][3][3];
 
@@ -74,8 +74,17 @@ int main(int argc, char *argv[]) {
 
   wbTime_start(Compute, "Doing the computation on the GPU");
   //@@ Initialize grid and block dimensions here
-
+  
+  //This DimGrid implies edge threads will have to load in extra halo cells
+  dim3 DimGrid(ceil((float)x_size/BLOCK_WIDTH),ceil((float)y_size/BLOCK_WIDTH),ceil((float)z_size/BLOCK_WIDTH));
+  dim3 DimBlock(BLOCK_WIDTH+2,BLOCK_WIDTH+2,BLOCK_WIDTH+2);
+  
   //@@ Launch the GPU kernel here
+
+  conv3d<<<DimGrid,DimBlock>>>(float *input, float *output, const int z_size,
+                       const int y_size, const int x_size)
+
+
   cudaDeviceSynchronize();
   wbTime_stop(Compute, "Doing the computation on the GPU");
 
