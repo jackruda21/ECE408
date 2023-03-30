@@ -6,7 +6,12 @@
 
 #include <wb.h>
 
-#define BLOCK_SIZE 512 //@@ You can change this
+//changed to 1024 so we guaruntee only 1 middle block,
+//this is b/c cap is 2048 x 2048, so 1st pass has max 2048 blocks
+//as each thread will load 2 values. Then, for 2nd pass, since there were
+//max 2048 blocks from before, there are only 2048 intermediary values 
+//which would fit into a single block which can load 2048 values
+#define BLOCK_SIZE 1024 //@@ You can change this
 
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
@@ -18,36 +23,87 @@
     }                                                                     \
   } while (0)
 
-__global__ void KSScan(float *input, float *output, int len, float *inter) {
+__global__ void BKScan(float *input, float *output, int len, float *inter) {
   //@@ Modify the body of this function to complete the functionality of
   //@@ the scan on the device
   //@@ You may need multiple kernel calls; write your kernels before this
   //@@ function and call them from the host
-  __shared__ float partialSum[BLOCK_SIZE];
+  __shared__ float partialSum[2*BLOCK_SIZE];
 
   //set up shared mem
-  int i = blockIdx.x*blockDim.x + threadIdx.x;
-  if (i < InputSize){
-    partialSum[threadIdx.x] = input[i];
+  int i = 2*(blockIdx.x*blockDim.x + threadIdx.x);
+  if (i < len){
+    partialSum[2*threadIdx.x] = input[i];
   }
   else{
-    partialSum[threadIdx.x] = 0;
+    partialSum[2*threadIdx.x] = 0;
   }
 
-  //Kogge-Stone addition into partial sum
-  for (unsigned int stride = 1; stride < blockDim.x; stride *= 2) {
+  if (i+1 < len){
+    partialSum[2*threadIdx.x+1] = input[i+1];
+  }
+  else{
+    partialSum[2*threadIdx.x+1] = 0;
+  }
+  
+  //Brent-Kung Algo
+  //Parallel Scan
+  int stride = 1;
+  int index = 0;
+  while(stride < 2*BLOCK_SIZE) {
     __syncthreads();
-    if (threadIdx.x >= stride) // This code has a data race condition!!!
-      partialSum[threadIdx.x] += partialSum[threadIdx.x-stride];
+    index = (threadIdx.x+1)*stride*2 - 1;
+    if(index < 2*BLOCK_SIZE && (index-stride) >= 0)
+      partialSum[index] += partialSum[index-stride];
+    stride = stride*2;
+  }
+
+  //Post Scan
+  stride = BLOCK_SIZE/2;
+  while(stride > 0) {
+    __syncthreads();
+    index = (threadIdx.x+1)*stride*2 - 1;
+    if ((index+stride) < 2*BLOCK_SIZE)
+      partialSum[index+stride] += partialSum[index];
+    stride = stride / 2;
   }
   
   //set output
-  output[i] = partialSum[threadIdx.x];
+  if(i<len)
+    output[i] = partialSum[2*threadIdx.x];
+  
+  if(i+1<len)
+   output[i+1] = partialSum[2*threadIdx.x+1];
+  
 
   //set intermediates if they're not NULL
-  if(threadIdx.x = BLOCK_SIZE-1 && inter != NULL){
-    inter[blockIdx.x] = partialSum[threadIdx.x];
+  if(threadIdx.x == 0 && inter != NULL){
+    inter[blockIdx.x] = partialSum[2*BLOCK_SIZE-1];
   }
+}
+
+//Kernel to add all intermediate block values to final output
+//**NOTE** Overwrites inout via +=
+__global__ void pAdd(float *input, int len, float *inter){
+  __shared__ float shInput[BLOCK_SIZE*2];
+  int i = 2*(blockIdx.x * BLOCK_SIZE + threadIdx.x);
+  if(i<len)
+    shInput[2*threadIdx.x] = input[i];
+  else
+    shInput[2*threadIdx.x] = 0;
+
+  if(i+1<len)
+    shInput[2*threadIdx.x+1] = input[i+1];
+  else
+    shInput[2*threadIdx.x+1] = 0;
+
+  //add intermediary values to each block
+  shInput[2*threadIdx.x] += inter[blockIdx.x];
+  shInput[2*threadIdx.x+1] += inter[blockIdx.x];
+
+  //overwrite value back to input array
+  input[i] = shInput[2*threadIdx.x] += inter[blockIdx.x];
+  input[i+1] = input[i] = shInput[2*threadIdx.x] += inter[blockIdx.x];
 
 }
 
@@ -87,17 +143,18 @@ int main(int argc, char **argv) {
 
   //@@ Initialize the grid and block dimensions here
 
-  int num_blocks = ceil((float)numInputElements/BLOCK_SIZE);
+  int num_blocks = ceil((float)numElements/(2*BLOCK_SIZE));
   //1st kernel is on all data
   dim3 DimGrid1(num_blocks,1,1);
   dim3 DimBlock1(BLOCK_SIZE,1,1);
 
   //2nd kernel will be on intermediary sums, of wich you have num_blocks of
+  //should always dispatch 1 block
   dim3 DimGrid2(ceil((float)num_blocks/BLOCK_SIZE),1,1);
   dim3 DimBlock2(BLOCK_SIZE,1,1);
 
-
-  dim3 DimGrid3(ceil((float)numInputElements/BLOCK_SIZE),1,1);
+  //3rd add kernel will have a 1 to 1 correspondence to 1st kernel blocks
+  dim3 DimGrid3(num_blocks,1,1);
   dim3 DimBlock3(BLOCK_SIZE,1,1);
 
   wbTime_start(Compute, "Performing CUDA computation");
@@ -105,16 +162,17 @@ int main(int argc, char **argv) {
   //@@ on the deivce
   
   //need to alloc additional global memory for intermediary sums
-  cudaMalloc((void **)&deviceInter, num_blocks * sizeof(float))
-  cudaMalloc((void **)&deviceInterOut, num_blocks * sizeof(float))
+  cudaMalloc((void **)&deviceInter, num_blocks * sizeof(float));
+  cudaMalloc((void **)&deviceInterOut, num_blocks * sizeof(float));
 
   //Kogge-Stone kernel scan of all input
-  KSScan<<DimGrid1, DimBlock1>>(deviceInput, deviceOutput, numInputElements, deviceInter);
+  BKScan<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, numElements, deviceInter);
 
   //Kogge-Stone kernel scan of intermediary sums
-  KSScan<<DimGrid2, DimBlock2>>(deviceInter, deviceInterOut, num_blocks, NULL);
+  BKScan<<<DimGrid2, DimBlock2>>>(deviceInter, deviceInterOut, num_blocks, NULL);
 
   //parallel add kernel
+  pAdd<<<DimGrid3, DimBlock3>>>(deviceOutput, numElements, deviceInterOut);
 
   cudaDeviceSynchronize();
   wbTime_stop(Compute, "Performing CUDA computation");
@@ -127,6 +185,9 @@ int main(int argc, char **argv) {
   wbTime_start(GPU, "Freeing GPU Memory");
   cudaFree(deviceInput);
   cudaFree(deviceOutput);
+  cudaFree(deviceInter);
+  cudaFree(deviceInterOut);
+
   wbTime_stop(GPU, "Freeing GPU Memory");
 
   wbSolution(args, hostOutput, numElements);
