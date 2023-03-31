@@ -67,6 +67,8 @@ __global__ void BKScan(float *input, float *output, int len, float *inter) {
       partialSum[index+stride] += partialSum[index];
     stride = stride / 2;
   }
+  //REQUIRED bc threads were writing to output before calculation was finished
+  __syncthreads();
   
   //set output
   if(i<len)
@@ -86,7 +88,11 @@ __global__ void BKScan(float *input, float *output, int len, float *inter) {
 //**NOTE** Overwrites inout via +=
 __global__ void pAdd(float *input, int len, float *inter){
   __shared__ float shInput[BLOCK_SIZE*2];
-  int i = 2*(blockIdx.x * BLOCK_SIZE + threadIdx.x);
+
+  //skipping 1st block of scan
+  int i = 2*((blockIdx.x+1) * BLOCK_SIZE + threadIdx.x);
+
+  //setup shared mem
   if(i<len)
     shInput[2*threadIdx.x] = input[i];
   else
@@ -97,13 +103,13 @@ __global__ void pAdd(float *input, int len, float *inter){
   else
     shInput[2*threadIdx.x+1] = 0;
 
-  //add intermediary values to each block
+  //add intermediary values to each block, it'd normally be inter[blockIdx.x-1] but we skipped 1st block, remember
   shInput[2*threadIdx.x] += inter[blockIdx.x];
   shInput[2*threadIdx.x+1] += inter[blockIdx.x];
 
   //overwrite value back to input array
-  input[i] = shInput[2*threadIdx.x] += inter[blockIdx.x];
-  input[i+1] = input[i] = shInput[2*threadIdx.x] += inter[blockIdx.x];
+  input[i] = shInput[2*threadIdx.x];
+  input[i+1] = shInput[2*threadIdx.x+1];
 
 }
 
@@ -153,8 +159,8 @@ int main(int argc, char **argv) {
   dim3 DimGrid2(ceil((float)num_blocks/BLOCK_SIZE),1,1);
   dim3 DimBlock2(BLOCK_SIZE,1,1);
 
-  //3rd add kernel will have a 1 to 1 correspondence to 1st kernel blocks
-  dim3 DimGrid3(num_blocks,1,1);
+  //3rd add kernel will have a 1 to 1 correspondence to 1st kernel blocks (but don't need to add inters to 1st block)
+  dim3 DimGrid3(num_blocks-1,1,1);
   dim3 DimBlock3(BLOCK_SIZE,1,1);
 
   wbTime_start(Compute, "Performing CUDA computation");
