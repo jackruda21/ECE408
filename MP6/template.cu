@@ -3,8 +3,18 @@
 #include <wb.h>
 
 #define HISTOGRAM_LENGTH 256
+#define BLOCK_SIZE 16
 
 //@@ insert code here
+__global__ void histEq(float *input, int height, int width){
+  //initialize shared data
+  __shared__ blockHistogram[HISTOGRAM_LENGTH];
+  __shared__ blockGrayImg[BLOCK_SIZE*BLOCK_SIZE];
+
+  //Set index
+  int idx = 
+
+}
 
 int main(int argc, char **argv) {
   wbArg_t args;
