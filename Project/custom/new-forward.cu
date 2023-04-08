@@ -3,7 +3,7 @@
 #include "gpu-new-forward.h"
 
 
-#define TILE_WIDTH 256
+#define TILE_WIDTH 16
 
 __global__ void conv_forward_kernel(float *output, const float *input, const float *mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K)
 {
@@ -40,16 +40,20 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 
     // Insert your GPU convolution kernel code here
     int W_grid = ceil(1.0*Width_out/TILE_WIDTH);
-    int b, m, h, w
+    int b, m, h, w;
     b = blockIdx.z;
     m = blockIdx.x;
     h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
     w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
-    float acc = 0.;
+    float acc = 0.0;
     for (int c = 0; c < Channel; c++) { // sum over all input channels
-        for (int p = 0; p < K; p++) // loop over KxK filter
-            for (int q = 0; q < K; q++)
-                acc += in_4d(b, c, h+p, w+q) * mask_4d(m, c, p, q);
+        for (int p = 0; p < K; p++){ // loop over KxK filter
+            for (int q = 0; q < K; q++){
+                if(h+p < Height && w+q < Width){
+                    acc += in_4d(b, c, h+p, w+q) * mask_4d(m, c, p, q);
+                }
+            }
+        }
     }
     if(h<Height_out && w<Width_out){
         out_4d(b,m,h,w) = acc;
@@ -77,12 +81,21 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     //     exit(-1);
     // }
 
-    cudaMalloc((void**)device_input_ptr);
-    cudaMalloc((void**)device_output_ptr);
-    cudaMalloc((void**)device_mask_ptr);
+    //calculate input/output sizes
+    const int Height_out = Height - K + 1;
+    const int Width_out = Width - K + 1;
 
-    cudaMemcpy(device_Input_ptr, host_Input, Height*Width*Channel*Batch * sizeof(float), cudaMemcpyHostToDevice)
-    cudaMemcpy(device_mask_ptr, host_mask, K*K*Channel*Batch * sizeof(float), cudaMemcpyHostToDevice)
+    int input_size = Height*Width*Channel*Batch;
+    int output_size = Height_out*Width_out*Map_out*Batch;
+    int mask_size = K*K*Channel*Map_out;
+
+    cudaMalloc((void**)device_input_ptr, input_size * sizeof(float));
+    cudaMalloc((void**)device_output_ptr, output_size * sizeof(float));
+    cudaMalloc((void**)device_mask_ptr, mask_size * sizeof(float));
+
+    cudaMemcpy(*device_input_ptr, host_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(*device_mask_ptr, host_mask, mask_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(*device_output_ptr, host_output, output_size * sizeof(float), cudaMemcpyHostToDevice);
 
 }
 
@@ -92,23 +105,32 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
 {
     // Set the kernel dimensions and call the kernel
     
-    W_grid = W_out/TILE_WIDTH; // number of horizontal tiles per output map
-    H_grid = H_out/TILE_WIDTH; // number of vertical tiles per output map
-    Y = H_grid * W_grid;
+    const int Height_out = Height - K + 1;
+    const int Width_out = Width - K + 1;
+
+    int W_grid = ceil(1.0*Width_out/TILE_WIDTH); // number of horizontal tiles per output map
+    int H_grid = ceil(1.0*Height_out/TILE_WIDTH); // number of vertical tiles per output map
+    int Y = H_grid * W_grid;
 
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1); // output tile for untiled code
     dim3 gridDim(Map_out, Y, Batch);
 
     conv_forward_kernel<<<gridDim, blockDim >>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
-
+    cudaDeviceSynchronize();
 }
 
 
 __host__ void GPUInterface::conv_forward_gpu_epilog(float *host_output, float *device_output, float *device_input, float *device_mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K)
 {
     // Copy the output back to host
-
+    const int Height_out = Height - K + 1;
+    const int Width_out = Width - K + 1;
+    int output_size = Height_out*Width_out*Map_out*Batch;
+    cudaMemcpy(host_output, device_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);
     // Free device memory
+    cudaFree(device_input);
+    cudaFree(device_output);
+    cudaFree(device_mask);
 
 }
 
