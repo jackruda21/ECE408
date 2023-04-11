@@ -6,13 +6,14 @@
 #define BLOCK_SIZE 16
 
 //@@ insert code here
-__global__ void histEq1(float *input, float *output, float *histo, float* cdf, int height, int width, int* sync_blocks, int len){
+//CREATE HISTOGRAM GOOD
+__global__ void histEq1(float *input, float *output, unsigned int *histo, float* cdf, int height, int width, int* sync_blocks, int len){
   //initialize shared data
-  __shared__ int blockHistogram[HISTOGRAM_LENGTH];
+  __shared__ unsigned int blockHistogram[HISTOGRAM_LENGTH];
   __shared__ unsigned char blockGrayImg[BLOCK_SIZE*BLOCK_SIZE];
-  __shared__ unsigned char ucharInputRed[BLOCK_SIZE*BLOCK_SIZE];
-  __shared__ unsigned char ucharInputGreen[BLOCK_SIZE*BLOCK_SIZE];
-  __shared__ unsigned char ucharInputBlue[BLOCK_SIZE*BLOCK_SIZE];
+  __shared__ float ucharInputRed[BLOCK_SIZE*BLOCK_SIZE];
+  __shared__ float ucharInputGreen[BLOCK_SIZE*BLOCK_SIZE];
+  __shared__ float ucharInputBlue[BLOCK_SIZE*BLOCK_SIZE];
 
   //Set indices
   int ix = blockIdx.x * blockDim.x + threadIdx.x; //x ccoord in input image
@@ -21,23 +22,25 @@ __global__ void histEq1(float *input, float *output, float *histo, float* cdf, i
   int block_idx = threadIdx.y * BLOCK_SIZE + threadIdx.x; //index from 0-255 within block
   //int error_timer;
 
-  ucharInputRed[block_idx] = (unsigned char) 255 * input[3*idx];
-  ucharInputGreen[block_idx] = (unsigned char) 255 * input[3*idx + 1];
-  ucharInputBlue[block_idx] = (unsigned char) 255 * input[3*idx + 2];
+  ucharInputRed[block_idx] = input[3*idx];
+  ucharInputGreen[block_idx] = input[3*idx + 1];
+  ucharInputBlue[block_idx] = input[3*idx + 2];
 
   // Set shared block w/ grayscale values
-  blockGrayImg[block_idx] = (unsigned char) (0.21*ucharInputRed[block_idx] + 0.71*ucharInputGreen[block_idx] + 0.07*ucharInputBlue[block_idx]);
+  blockGrayImg[block_idx] = (unsigned char) (255*(0.21*ucharInputRed[block_idx] + 0.71*ucharInputGreen[block_idx] + 0.07*ucharInputBlue[block_idx]));
 
   //init histogram to 0
   blockHistogram[block_idx] = 0;
+  __syncthreads();
 
   //create local shared histogram based on image
-  atomicAdd( &(blockHistogram[blockGrayImg[block_idx]]), 1);
+  atomicAdd( &(blockHistogram[blockGrayImg[block_idx]]), 1.0);
   __syncthreads();
 
   //add to global histogram
   atomicAdd( &histo[block_idx] , blockHistogram[block_idx]);
-
+  __syncthreads();
+  
 }
 
 
@@ -121,7 +124,7 @@ __global__ void histEq1(float *input, float *output, float *histo, float* cdf, i
   // }
 
 //kernel function to compute CDF, uses Brent-Kung algorithm from MP5.2
-__global__ void computeCDF(float *input, float *output, int len){
+__global__ void computeCDF(unsigned int *input, float *output, int len, int height, int width){
 
   __shared__ float partialSum[HISTOGRAM_LENGTH];
   //set up shared mem
@@ -167,13 +170,13 @@ __global__ void computeCDF(float *input, float *output, int len){
   
   //set output
   if(i<len)
-    output[i] = partialSum[2*threadIdx.x];
+    output[i] = (float)partialSum[2*threadIdx.x] / (height * width);
   
   if(i+1<len)
-   output[i+1] = partialSum[2*threadIdx.x+1];
+   output[i+1] = (float)partialSum[2*threadIdx.x+1] / (height * width);
 }
 
-__global__ void histEq2(float *input, float *output, float *histo, float* cdf, int height, int width, int* sync_blocks, int len){
+__global__ void histEq2(float *input, float *output, unsigned int *histo, float* cdf, int height, int width, int* sync_blocks, int len){
   __shared__ unsigned char ucharInputRed[BLOCK_SIZE*BLOCK_SIZE];
   __shared__ unsigned char ucharInputGreen[BLOCK_SIZE*BLOCK_SIZE];
   __shared__ unsigned char ucharInputBlue[BLOCK_SIZE*BLOCK_SIZE];
@@ -184,20 +187,18 @@ __global__ void histEq2(float *input, float *output, float *histo, float* cdf, i
   int idx = iy * width + ix;  //index into input image (only x,y, not channel)
   int block_idx = threadIdx.y * BLOCK_SIZE + threadIdx.x; //index from 0-255 within block
 
-  ucharInputRed[block_idx] = (unsigned char) 255 * input[3*idx];
-  ucharInputGreen[block_idx] = (unsigned char) 255 * input[3*idx + 1];
-  ucharInputBlue[block_idx] = (unsigned char) 255 * input[3*idx + 2];
+  ucharInputRed[block_idx] = (unsigned char) (255 * input[3*idx]);
+  ucharInputGreen[block_idx] = (unsigned char) (255 * input[3*idx + 1]);
+  ucharInputBlue[block_idx] = (unsigned char) (255 * input[3*idx + 2]);
   
   //color correcting process
   ucharInputRed[block_idx] = min(max((255*(cdf[ucharInputRed[block_idx]] - cdf[0])/(1.0 - cdf[0])), 0.0), 255.0); //correct_color(ucharImage[ii]);
   ucharInputGreen[block_idx] = min(max((255*(cdf[ucharInputGreen[block_idx]] - cdf[0])/(1.0 - cdf[0])), 0.0), 255.0);
   ucharInputBlue[block_idx] = min(max((255*(cdf[ucharInputBlue[block_idx]] - cdf[0])/(1.0 - cdf[0])), 0.0), 255.0);
 
-  if(3*idx < height * width * 3){
-    output[3*idx] = (float)(ucharInputRed[block_idx]/255.0);
-    output[3*idx + 1] = (float)(ucharInputGreen[block_idx]/255.0);
-    output[3*idx + 2] = (float)(ucharInputBlue[block_idx]/255.0);
-  }
+  output[3*idx] = (float)ucharInputRed[block_idx]/255.0;
+  output[3*idx + 1] = (float)ucharInputGreen[block_idx]/255.0;
+  output[3*idx + 2] = (float)ucharInputBlue[block_idx]/255.0;
 }
 
 int main(int argc, char **argv) {
@@ -214,10 +215,14 @@ int main(int argc, char **argv) {
   //@@ Insert more code here
   float *deviceInput;
   float *deviceOutput;
-  float *deviceHisto;
+  unsigned int *deviceHisto;
   float *deviceCDF;
   int *sync_blocks;
 
+  float* hostCDF;
+  unsigned int *hostHist;
+
+  int host_sync;
 
   args = wbArg_read(argc, argv); /* parse the input arguments */
 
@@ -238,7 +243,7 @@ int main(int argc, char **argv) {
   //alloc device mem
   cudaMalloc((void**)&deviceInput, imageWidth*imageHeight*imageChannels*sizeof(float));
   cudaMalloc((void**)&deviceOutput, imageWidth*imageHeight*imageChannels*sizeof(float));
-  cudaMalloc((void**)&deviceHisto, HISTOGRAM_LENGTH*sizeof(float));
+  cudaMalloc((void**)&deviceHisto, HISTOGRAM_LENGTH*sizeof(unsigned int));
   cudaMalloc((void**)&deviceCDF, HISTOGRAM_LENGTH*sizeof(float));
   cudaMalloc((void**)&sync_blocks, sizeof(int));
 
@@ -255,17 +260,42 @@ int main(int argc, char **argv) {
   //call kernel
   histEq1<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, deviceHisto, deviceCDF, imageHeight, imageWidth, sync_blocks, HISTOGRAM_LENGTH);
   cudaDeviceSynchronize();
-  computeCDF<<<DimGrid2, DimBlock2>>>(deviceHisto, deviceCDF, HISTOGRAM_LENGTH);
+
+  hostHist = (unsigned int*)malloc(HISTOGRAM_LENGTH * sizeof(unsigned int));
+  cudaMemcpy(hostHist, deviceHisto, HISTOGRAM_LENGTH*sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&host_sync, sync_blocks, sizeof(int), cudaMemcpyDeviceToHost);
+
+  computeCDF<<<DimGrid2, DimBlock2>>>(deviceHisto, deviceCDF, HISTOGRAM_LENGTH, imageHeight, imageWidth);
   cudaDeviceSynchronize();
+
+  hostCDF = (float*)malloc(HISTOGRAM_LENGTH * sizeof(float));
+  cudaMemcpy(hostCDF, deviceCDF, HISTOGRAM_LENGTH*sizeof(float), cudaMemcpyDeviceToHost);
+
   histEq2<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, deviceHisto, deviceCDF, imageHeight, imageWidth, sync_blocks, HISTOGRAM_LENGTH);
   cudaDeviceSynchronize();
 
   //retrieve output from device
-  cudaMemcpy(hostOutputImageData, deviceOutput, imageWidth*imageHeight*sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(hostOutputImageData, deviceOutput, imageWidth*imageHeight*imageChannels*sizeof(float), cudaMemcpyDeviceToHost);
 
   wbSolution(args, outputImage);
 
-  wbExport('./data/out.ppm');
+  // if(imageHeight == 256 && imageWidth == 256){
+  //   wbLog(TRACE, host_sync);
+  //   for(int i=0; i<HISTOGRAM_LENGTH/4; i++){
+  //     wbLog(TRACE, hostHist[4*i], ' ', hostHist[4*i+1], ' ', hostHist[4*i+2], ' ', hostHist[4*i+3]);
+  //   }
+  //   wbLog(TRACE, ' ');
+  //   for(int i=0; i<HISTOGRAM_LENGTH/4; i++){
+  //     wbLog(TRACE, hostCDF[4*i], ' ', hostCDF[4*i+1], ' ', hostCDF[4*i+2], ' ', hostCDF[4*i+3]);
+  //   }
+
+  //   wbFile_t out = wbFile_open("./data/out.ppm", "w");
+  //   wbImage_t solution = wbImage_new(imageWidth, imageHeight, imageChannels, hostOutputImageData);
+  //   wbExport("./data/out.ppm", solution);
+  // }
+
+  free(hostCDF);
+  free(hostHist);
 
   //@@ insert code here
   cudaFree(deviceInput);
