@@ -6,8 +6,7 @@
 #define BLOCK_SIZE 16
 
 //@@ insert code here
-//CREATE HISTOGRAM GOOD
-__global__ void histEq1(float *input, float *output, unsigned int *histo, float* cdf, int height, int width, int* sync_blocks, int len){
+__global__ void histEq1(float *input, float *output, unsigned int *histo, float* cdf, int height, int width, int len){
   //initialize shared data
   __shared__ unsigned int blockHistogram[HISTOGRAM_LENGTH];
   __shared__ unsigned char blockGrayImg[BLOCK_SIZE*BLOCK_SIZE];
@@ -42,8 +41,6 @@ __global__ void histEq1(float *input, float *output, unsigned int *histo, float*
   __syncthreads();
   
 }
-
-
 
   // //init sync_blocks to 0
   // *sync_blocks = 0;
@@ -176,7 +173,7 @@ __global__ void computeCDF(unsigned int *input, float *output, int len, int heig
    output[i+1] = (float)partialSum[2*threadIdx.x+1] / (height * width);
 }
 
-__global__ void histEq2(float *input, float *output, unsigned int *histo, float* cdf, int height, int width, int* sync_blocks, int len){
+__global__ void histEq2(float *input, float *output, unsigned int *histo, float* cdf, int height, int width, int len){
   __shared__ unsigned char ucharInputRed[BLOCK_SIZE*BLOCK_SIZE];
   __shared__ unsigned char ucharInputGreen[BLOCK_SIZE*BLOCK_SIZE];
   __shared__ unsigned char ucharInputBlue[BLOCK_SIZE*BLOCK_SIZE];
@@ -217,12 +214,7 @@ int main(int argc, char **argv) {
   float *deviceOutput;
   unsigned int *deviceHisto;
   float *deviceCDF;
-  int *sync_blocks;
-
-  float* hostCDF;
-  unsigned int *hostHist;
-
-  int host_sync;
+  //int *sync_blocks;
 
   args = wbArg_read(argc, argv); /* parse the input arguments */
 
@@ -245,7 +237,7 @@ int main(int argc, char **argv) {
   cudaMalloc((void**)&deviceOutput, imageWidth*imageHeight*imageChannels*sizeof(float));
   cudaMalloc((void**)&deviceHisto, HISTOGRAM_LENGTH*sizeof(unsigned int));
   cudaMalloc((void**)&deviceCDF, HISTOGRAM_LENGTH*sizeof(float));
-  cudaMalloc((void**)&sync_blocks, sizeof(int));
+  //cudaMalloc((void**)&sync_blocks, sizeof(int));
 
   //copy input image to device
   cudaMemcpy(deviceInput, hostInputImageData, imageWidth*imageHeight*imageChannels*sizeof(float), cudaMemcpyHostToDevice);
@@ -257,21 +249,14 @@ int main(int argc, char **argv) {
   dim3 DimGrid2(1,1,1);
   dim3 DimBlock2(HISTOGRAM_LENGTH/2,1,1);
 
-  //call kernel
-  histEq1<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, deviceHisto, deviceCDF, imageHeight, imageWidth, sync_blocks, HISTOGRAM_LENGTH);
+  //call histogramming kernel
+  histEq1<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, deviceHisto, deviceCDF, imageHeight, imageWidth, HISTOGRAM_LENGTH);
   cudaDeviceSynchronize();
-
-  hostHist = (unsigned int*)malloc(HISTOGRAM_LENGTH * sizeof(unsigned int));
-  cudaMemcpy(hostHist, deviceHisto, HISTOGRAM_LENGTH*sizeof(unsigned int), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&host_sync, sync_blocks, sizeof(int), cudaMemcpyDeviceToHost);
-
+  //call cdf kernel
   computeCDF<<<DimGrid2, DimBlock2>>>(deviceHisto, deviceCDF, HISTOGRAM_LENGTH, imageHeight, imageWidth);
   cudaDeviceSynchronize();
-
-  hostCDF = (float*)malloc(HISTOGRAM_LENGTH * sizeof(float));
-  cudaMemcpy(hostCDF, deviceCDF, HISTOGRAM_LENGTH*sizeof(float), cudaMemcpyDeviceToHost);
-
-  histEq2<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, deviceHisto, deviceCDF, imageHeight, imageWidth, sync_blocks, HISTOGRAM_LENGTH);
+  //call color equalization kernel
+  histEq2<<<DimGrid1, DimBlock1>>>(deviceInput, deviceOutput, deviceHisto, deviceCDF, imageHeight, imageWidth, HISTOGRAM_LENGTH);
   cudaDeviceSynchronize();
 
   //retrieve output from device
@@ -279,6 +264,7 @@ int main(int argc, char **argv) {
 
   wbSolution(args, outputImage);
 
+  //Testing Outputs
   // if(imageHeight == 256 && imageWidth == 256){
   //   wbLog(TRACE, host_sync);
   //   for(int i=0; i<HISTOGRAM_LENGTH/4; i++){
@@ -294,15 +280,11 @@ int main(int argc, char **argv) {
   //   wbExport("./data/out.ppm", solution);
   // }
 
-  free(hostCDF);
-  free(hostHist);
-
   //@@ insert code here
   cudaFree(deviceInput);
   cudaFree(deviceOutput);
   cudaFree(deviceHisto);
   cudaFree(deviceCDF);
-  cudaFree(sync_blocks);
 
   return 0;
 }
