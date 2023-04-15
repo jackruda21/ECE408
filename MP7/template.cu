@@ -10,10 +10,52 @@
     }                                                                     \
   } while (0)
 
+#define BLOCK_SIZE 64
+
 __global__ void spmvJDSKernel(float *out, int *matColStart, int *matCols,
                               int *matRowPerm, int *matRows,
                               float *matData, float *vec, int dim) {
   //@@ insert spmv kernel for jds format
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < dim) {
+    float dot = 0;
+    int num_in_row = matRows[row];
+    int col_start = 0;
+    //for (int i = 0; i< num_in_row; i++) {
+      //matColStart[i] would be the column in which i is in
+      //but maybe you don't have an el in every column, sou you'd
+      //have to increment i again which is why we use col_start instead
+
+      //now if the column index position would be into the next column
+      //based on the start indices, we know that there shouldn't be
+      //any data in this column so we increment col_start until we get a valid col.
+
+      //A
+      //works on even less rows than B & C
+      // while(matColStart[col_start]+row >= matColStart[col_start+1]){
+      //   col_start ++;
+      // }
+
+
+      //B
+      //works equally as well as C
+      for(int i=0; i<matRows[0]; i++){
+        if(matColStart[i] + row < matColStart[i+1]){
+          dot += matData[matColStart[i]+row] * vec[matCols[matColStart[i]+row]];  
+        }
+      }
+
+
+      //C
+      //works except for a few rows for some reason
+      /*
+      while(matColStart[col_start+1] - matColStart[col_start] > row){
+        dot += matData[matColStart[col_start]+row] * vec[matCols[matColStart[col_start]+row]];
+        col_start ++;
+      }*/
+    //}
+    out[matRowPerm[row]] = dot;
+  }
 }
 
 static void spmvJDS(float *out, int *matColStart, int *matCols,
@@ -21,6 +63,13 @@ static void spmvJDS(float *out, int *matColStart, int *matCols,
                     float *vec, int dim) {
 
   //@@ invoke spmv kernel for jds format
+  //set up gridsize
+  dim3 DimGrid(ceil((float)dim/BLOCK_SIZE),1,1);
+  dim3 DimBlock(BLOCK_SIZE,1,1);
+
+  //call kernel
+  spmvJDSKernel<<<DimGrid, DimBlock>>>(out, matColStart, matCols, matRowPerm, matRows, matData, vec, dim);
+
 }
 
 int main(int argc, char **argv) {
@@ -102,6 +151,12 @@ int main(int argc, char **argv) {
   cudaFree(deviceJDSData);
 
   wbTime_stop(GPU, "Freeing GPU Memory");
+
+  if(dim == 16){
+    for(int i=0; i<dim; i++){
+      wbLog(TRACE, hostOutput[i]);
+    }
+  }
 
   wbSolution(args, hostOutput, dim);
 
