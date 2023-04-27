@@ -5,18 +5,22 @@
 // blockdim is this + K -1
 #define TILE_WIDTH 26
 #define TILE_HEIGHT 26
+#define K_SIZE 7
 
 /* optimizations:
  * TiledShared Mem - 2 pts
  * Kernel in Constant Mem - 1 pt
  * Matrix Multiplication/Unrolling - 3 pts
  * Streams - 4 pts
+ *
+ * Tuning unroll & restrict - 3pts
+ * Fixed Point Arithmetic - 4pts
  */
 
 int err_ct = 0;
 __constant__ float KFILTER[1 * 7 * 7 * 4*16];
 
-__global__ void conv_forward_kernel(float *output, const float *input, const float *mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K)
+__global__ void conv_forward_kernel(float* __restrict__ output, const float* __restrict__ input, const float* __restrict__ mask, const int Batch, const int Map_out, const int Channel, const int Height, const int Width, const int K)
 {
     /*
     Modify this function to implement the forward pass described in Chapter 16.
@@ -36,7 +40,7 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     */
 
     //set up shared mem tile, Assume K is always 7, and that channel <= 4 
-    __shared__ float input_tile[(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1)*4];
+    //__shared__ float input_tile[(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1)*4];
 
     const int Height_out = Height - K + 1;
     const int Width_out = Width - K + 1;
@@ -52,72 +56,26 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     #define in_4d(i3, i2, i1, i0) input[(i3) * (Channel * Height * Width) + (i2) * (Height * Width) + (i1) * (Width) + i0]
     #define mask_4d(i3, i2, i1, i0) KFILTER[(i3) * (Channel * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
-        // Insert your GPU convolution kernel code here
+    // Insert your GPU convolution kernel code here
     int W_grid = ceil(1.0*Width_out/TILE_WIDTH);
-    //int H_grid = ceil(1.0*Width_out/TILE_WIDTH);
-
-    int b, m;//, h, w;
+    int b, m, h, w;
     b = blockIdx.z;
     m = blockIdx.x;
-    //h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
-    //w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
-    
-    /*
-    //tile variables, x,y of input
-    int x = w - K/2;
-    int y = h - K/2;
-    //tile variables, local x,y threads w/ offset
-    int tx = threadIdx.x - K/2;
-    int ty = threadIdx.y - K/2;
-    */
-
+    h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
+    w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
     float acc = 0.0;
-
-    int off = 3; // K/2
-
-    int tx = threadIdx.x; 
-    int ty = threadIdx.y;
-
-    int y = (blockIdx.y / W_grid) * TILE_HEIGHT + ty - off;
-    int x = (blockIdx.y % W_grid) * TILE_WIDTH + tx - off;
-
-    for (int c = 0; c < Channel; c++) { 
-        //set tile
-        if(x<0 || x>=Width || y<0 || y>=Height){
-            input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + ty*(TILE_WIDTH+K-1)+tx] = 0;
-        }
-        else{
-            input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + ty*(TILE_WIDTH+K-1)+tx] = in_4d(b,c,y,x);
-        }
-    }
-    //sync
-    __syncthreads();
-
     for (int c = 0; c < Channel; c++) { // sum over all input channels
-        // //set tile
-        // if(x<0 || x>=Width || y<0 || y>=Height){
-        //     input_tile[ty*(TILE_WIDTH+K-1)+tx] = 0;
-        // }
-        // else{
-        //     input_tile[ty*(TILE_WIDTH+K-1)+tx] = in_4d(b,c,y,x);
-        // }
-        // //sync
-        // __syncthreads();
-
-        if(tx >= off && tx < (TILE_WIDTH+K-1-off) && ty >= off && ty < (TILE_HEIGHT+K-1-off)){
-            //perform convolution
-            for (int p = 0; p < K; p++){ // loop over KxK filter
-                for (int q = 0; q < K; q++){
-                    acc += input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + (ty-off+p)*(TILE_WIDTH+K-1) + tx-off+q] * mask_4d(m, c, p, q);
+        if(h< Height-K+1 && w < Width-K+1){
+            #pragma unroll
+            for (int p = 0; p < K_SIZE; p++){ // loop over KxK filter, unroll convolution
+                for (int q = 0; q < K_SIZE; q++){
+                        acc += in_4d(b, c, h+p, w+q) * mask_4d(m, c, p, q);
                 }
             }
         }
-        //sync
-        //__syncthreads();
-    }   
-    //if(ty>=0 && ty<TILE_WIDTH && y>=0 && y<Height_out && tx>=0 && tx<TILE_WIDTH && x>=0 && x<Width_out)
-    if(tx >= off && tx < (TILE_WIDTH+off) && ty >= off && ty < (TILE_HEIGHT+off) && y>=off && y<Height_out+off && x>=off && x<Width_out+off){
-        out_4d(b,m,(y-off),(x-off)) = acc;
+    }
+    if(h<Height_out && w<Width_out){
+        out_4d(b,m,h,w) = acc;
     }
     
     #undef out_4d
@@ -151,7 +109,7 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     //int mask_size = K*K*Channel*Map_out;
 
     cudaMalloc((void**)device_input_ptr, input_size * sizeof(float));
-    std::cout<<"Size: "<<input_size * sizeof(float)<<'\n';
+    //std::cout<<"Size: "<<input_size * sizeof(float)<<'\n';
     cudaMalloc((void**)device_output_ptr, output_size * sizeof(float));
     //cudaMalloc((void**)device_mask_ptr, mask_size * sizeof(float));
 
@@ -172,9 +130,9 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
     // Set the kernel dimensions and call the kernel
     
     //std::cout<<"K: "<<K<<'\n';
-    std::cout<<"H: "<<Height<<'\n';
-    std::cout<<"W: "<<Width<<'\n';
-    std::cout<<"C: "<<Channel<<'\n';
+    // std::cout<<"H: "<<Height<<'\n';
+    // std::cout<<"W: "<<Width<<'\n';
+    // std::cout<<"C: "<<Channel<<'\n';
 
     const int Height_out = Height - K + 1;
     const int Width_out = Width - K + 1;
@@ -190,7 +148,7 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
     dim3 blockDim(TILE_WIDTH+K-1, TILE_HEIGHT+K-1, 1); // output tile for untiled code
     dim3 gridDim(Map_out, Y, Batch);
 
-    std::cout<<"Block Size: "<<(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)<<'\n';
+    // std::cout<<"Block Size: "<<(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)<<'\n';
 
     conv_forward_kernel<<<gridDim, blockDim >>>(device_output, device_input, device_mask, Batch, Map_out, Channel, Height, Width, K);
     cudaDeviceSynchronize();
@@ -206,6 +164,12 @@ __host__ void GPUInterface::conv_forward_gpu_epilog(float *host_output, float *d
     const int Width_out = Width - K + 1;
     int output_size = Height_out*Width_out*Map_out*Batch;
 
+    cudaError_t error = cudaGetLastError();
+    if(error != cudaSuccess)
+    {
+        std::cout<<"\t\tCUDA error: "<<cudaGetErrorString(error)<<std::endl;
+    }
+    
     cudaMemcpy(host_output, device_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);
     // Free device memory
     cudaFree(device_input);
