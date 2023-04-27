@@ -52,44 +52,56 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 
         // Insert your GPU convolution kernel code here
     int W_grid = ceil(1.0*Width_out/TILE_WIDTH);
-    int b, m, h, w;
+    int b, m;//, h, w;
     b = blockIdx.z;
     m = blockIdx.x;
-    h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
-    w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
+    //h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
+    //w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
+    
+    /*
     //tile variables, x,y of input
     int x = w - K/2;
     int y = h - K/2;
     //tile variables, local x,y threads w/ offset
     int tx = threadIdx.x - K/2;
     int ty = threadIdx.y - K/2;
+    */
+
     float acc = 0.0;
 
-    
+    int off = 3; // K/2
+
+    int tx = threadIdx.x; 
+    int ty = threadIdx.y;
+
+    int x = (blockIdx.y / W_grid) * TILE_WIDTH + tx - off;
+    int y = (blockIdx.y % W_grid) * TILE_WIDTH  + ty - off;
+        
     for (int c = 0; c < Channel; c++) { // sum over all input channels
         //set tile
-        if (x<0 || x>=Width || y<0 || y>=Height){
-            input_tile[threadIdx.y* (TILE_WIDTH+K-1) + threadIdx.x] = 0;    
+        if(x<0 || x>=Width || y<0 || y>=Height){
+            input_tile[ty*(TILE_WIDTH+K-1)+tx] = 0;
         }
         else{
-            input_tile[threadIdx.y* (TILE_WIDTH+K-1) + threadIdx.x] = in_4d(b, c, y, x);
+            input_tile[ty*(TILE_WIDTH+K-1)+tx] = in_4d(b,c,y,x);
         }
         //sync
         __syncthreads();
 
-        if(tx >= 0 && tx < TILE_WIDTH && ty >= 0 && ty < TILE_WIDTH){
+        if(tx >= off && tx < (TILE_WIDTH+K-1-off) && ty >= off && ty < (TILE_WIDTH+K-1-off)){
             //perform convolution
             for (int p = 0; p < K; p++){ // loop over KxK filter
                 for (int q = 0; q < K; q++){
-                    acc += input_tile[(ty+p)* (TILE_WIDTH+K-1) + tx + q] * mask_4d(m, c, p, q);
+                    acc += input_tile[(ty-off+p)*(TILE_WIDTH+K-1) + tx-off+q] * mask_4d(m, c, p, q);
                 }
             }
         }
         //sync
         __syncthreads();
     }   
-    if(ty>=0 && ty<TILE_WIDTH && y>=0 && y<Height_out && tx>=0 && tx<TILE_WIDTH && x>=0 && x<Width_out){
-        out_4d(b,m,y,x) = acc;
+    //if(ty>=0 && ty<TILE_WIDTH && y>=0 && y<Height_out && tx>=0 && tx<TILE_WIDTH && x>=0 && x<Width_out)
+    if(tx >= off && tx < (TILE_WIDTH+off) && ty >= off && ty < (TILE_WIDTH+off) && y>=off && y<Height_out+off && x>=off && x<Width_out+off){
+        out_4d(b,m,(y-off),(x-off)) = acc;
     }
     
     #undef out_4d
