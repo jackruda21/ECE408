@@ -4,8 +4,8 @@
 #include <cuda_fp16.h>
 
 // blockdim is this + K -1
-#define TILE_WIDTH 58
-#define TILE_HEIGHT 10
+#define TILE_WIDTH 21
+#define TILE_HEIGHT 21
 #define K_SIZE 7
 
 /* optimizations:
@@ -45,7 +45,7 @@ __global__ void conv_forward_kernel(float* __restrict__ output, const /*__half* 
 
     //set up shared mem tile, Assume K is always 7, and that channel <= 4 
     __shared__ /*__half */ float input_tile[(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1)*4];
- 
+
     const int Height_out = Height - K + 1;
     const int Width_out = Width - K + 1;
     // (void)Height_out; // silence declared but never referenced warning. remove this line when you start working
@@ -117,45 +117,27 @@ __global__ void conv_forward_kernel(float* __restrict__ output, const /*__half* 
 
 
     /*
-    int y = (blockIdx.y / W_grid) * TILE_HEIGHT + ty - off;
-    int x = (blockIdx.y % W_grid) * TILE_WIDTH + tx - off;
-
-    for (int c = 0; c < Channel; c++) { 
-        //set tile
-        if(x<0 || x>=Width || y<0 || y>=Height){
-            input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + ty*(TILE_WIDTH+K-1)+tx] = 0;
-        }
-        else{
-            input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + ty*(TILE_WIDTH+K-1)+tx] = in_4d(b,c,y,x);
-        }
-    }
-    //sync
-    __syncthreads();
-
+    int h = (blockIdx.y / W_grid) * TILE_WIDTH + threadIdx.y;
+    int w = (blockIdx.y % W_grid) * TILE_WIDTH + threadIdx.x;
     for (int c = 0; c < Channel; c++) { // sum over all input channels
-        if(tx >= off && tx < (TILE_WIDTH+K-1-off) && ty >= off && ty < (TILE_HEIGHT+K-1-off)){
-            //perform convolution
+        if(h< Height-K+1 && w < Width-K+1){
             #pragma unroll
-            for (int p = 0; p < K; p++){ // loop over KxK filter
-                for (int q = 0; q < K; q++){
-                    //FP16
-                    //acc = __hadd(acc, __hmul(input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + (ty-off+p)*(TILE_WIDTH+K-1) + tx-off+q], __float2half(mask_4d(m, c, p, q))));
-                    acc += input_tile[c*(TILE_HEIGHT+7-1)*(TILE_WIDTH+7-1) + (ty-off+p)*(TILE_WIDTH+K-1) + tx-off+q] * mask_4d(m, c, p, q);
+            for (int p = 0; p < K_SIZE; p++){ // loop over KxK filter, unroll convolution
+                for (int q = 0; q < K_SIZE; q++){
+                        acc += in_4d(b, c, h+p, w+q) * mask_4d(m, c, p, q);
                 }
             }
         }
-    }   
-    //if(ty>=0 && ty<TILE_WIDTH && y>=0 && y<Height_out && tx>=0 && tx<TILE_WIDTH && x>=0 && x<Width_out)
-    if(tx >= off && tx < (TILE_WIDTH+off) && ty >= off && ty < (TILE_HEIGHT+off) && y>=off && y<Height_out+off && x>=off && x<Width_out+off){
-        out_4d(b,m,(y-off),(x-off)) = acc;
+    }
+    if(h<Height_out && w<Width_out){
+        out_4d(b,m,h,w) = acc;
     }*/
+    
     
     #undef out_4d
     #undef in_4d
     #undef mask_4d
 }
-
-// H x W: 40 x 40, C: 4 
 
 #define CONVERT_SIZE 1024
 
